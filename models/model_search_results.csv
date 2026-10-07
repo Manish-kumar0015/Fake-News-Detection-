@@ -1,0 +1,5 @@
+model,cv_macro_f1,best_params
+Linear SVM,0.9920094561984111,"{'class_weight': 'balanced', 'C': 10.0}"
+Random Forest,0.9897076694895718,"{'n_estimators': 100, 'min_samples_split': 5, 'min_samples_leaf': 1, 'max_features': 0.2, 'max_depth': 40, 'class_weight': 'balanced'}"
+Logistic Regression,0.9867483168589408,"{'solver': 'liblinear', 'class_weight': 'balanced', 'C': 3.0}"
+Multinomial Naive Bayes,0.9598625906240099,"{'fit_prior': False, 'alpha': 0.01}"

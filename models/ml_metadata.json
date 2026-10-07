@@ -1,0 +1,25 @@
+{
+    "best_model_name": "Linear SVM",
+    "best_cv_macro_f1": 0.9920094561984111,
+    "test_accuracy": 0.9948435277382646,
+    "test_precision_macro": 0.9947210555659636,
+    "test_recall_macro": 0.994964421406167,
+    "test_f1_macro": 0.994834302557347,
+    "vectorizer": {
+        "type": "TfidfVectorizer",
+        "stop_words": "english",
+        "ngram_range": [
+            1,
+            2
+        ],
+        "max_features": 80000,
+        "min_df": 2,
+        "max_df": 0.98,
+        "sublinear_tf": true
+    },
+    "class_mapping": {
+        "0": "Fake",
+        "1": "Real"
+    },
+    "random_state": 42
+}

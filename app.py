@@ -2,337 +2,258 @@
 # FAKE NEWS DETECTION SYSTEM - STREAMLIT APPLICATION
 # ============================================================
 
-
-# ============================================================
-# 1. IMPORT LIBRARIES
-# ============================================================
-
-import streamlit as st
-import joblib
+import json
 import re
-import requests
-import numpy as np
+from pathlib import Path
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import joblib
+import streamlit as st
+
+from fact_checker import (
+    extract_claim,
+    search_fact_checks,
+    match_fact_checks,
+    combine_ml_and_factcheck,
+)
 
 
 # ============================================================
-# 2. STREAMLIT PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
-    page_title="Fake News Detection",
+    page_title="Fake News Detection System",
     page_icon="📰",
-    layout="centered"
+    layout="wide",
 )
 
 
 # ============================================================
-# 3. LOAD TRAINED ML MODELS
+# 2. PATHS
 # ============================================================
 
-# Load the TF-IDF vectorizer that was trained in the notebook
-vectorization = joblib.load(
-    "models/tfidf_vectorizer.pkl"
-)
-
-# Load the trained Logistic Regression model
-LR = joblib.load(
-    "models/logistic_regression.pkl"
-)
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "models"
 
 
 # ============================================================
-# 4. TEXT PREPROCESSING
+# 3. LOAD THE AUTOMATICALLY SELECTED ML MODEL
+# ============================================================
+
+@st.cache_resource
+def load_ml_artifacts():
+    vectorizer = joblib.load(
+        MODEL_DIR / "tfidf_vectorizer.pkl"
+    )
+
+    model = joblib.load(
+        MODEL_DIR / "best_model.pkl"
+    )
+
+    metadata_path = MODEL_DIR / "ml_metadata.json"
+
+    if metadata_path.exists():
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+    else:
+        metadata = {}
+
+    return vectorizer, model, metadata
+
+
+try:
+    vectorizer, ml_model, ml_metadata = load_ml_artifacts()
+    MODEL_LOAD_ERROR = None
+except Exception as exc:
+    vectorizer = None
+    ml_model = None
+    ml_metadata = {}
+    MODEL_LOAD_ERROR = str(exc)
+
+
+# ============================================================
+# 4. TEXT CLEANING
 # ============================================================
 
 def clean_text(text):
-
-    # Convert input to string and lowercase
     text = str(text).lower()
 
-    # Remove URLs
     text = re.sub(
-        r'https?://\S+',
-        ' ',
-        text
+        r"https?://\S+",
+        " ",
+        text,
     )
 
-    # Remove www URLs
     text = re.sub(
-        r'www\.\S+',
-        ' ',
-        text
+        r"www\.\S+",
+        " ",
+        text,
     )
 
-    # Remove HTML tags
     text = re.sub(
-        r'<.*?>',
-        ' ',
-        text
+        r"<.*?>",
+        " ",
+        text,
     )
 
-    # Keep only English letters and spaces
     text = re.sub(
-        r'[^a-zA-Z\s]',
-        ' ',
-        text
+        r"[^a-zA-Z\s]",
+        " ",
+        text,
     )
 
-    # Replace multiple spaces with one space
     text = re.sub(
-        r'\s+',
-        ' ',
-        text
-    )
+        r"\s+",
+        " ",
+        text,
+    ).strip()
 
-    # Remove extra spaces from beginning/end
-    return text.strip()
-
-
-# ============================================================
-# 5. MACHINE LEARNING PREDICTION
-# ============================================================
-
-def get_ml_prediction(news):
-
-    # Clean the input news
-    news = clean_text(news)
-
-    # Convert cleaned text into TF-IDF features
-    vector = vectorization.transform([news])
-
-    # Get predicted class
-    pred = LR.predict(vector)[0]
-
-    # Get probability for each class
-    proba = LR.predict_proba(vector)[0]
-
-    # According to your trained model:
-    # class 0 = Fake
-    # class 1 = Real
-
-    fake_prob = float(proba[0])
-    real_prob = float(proba[1])
-
-    return pred, fake_prob, real_prob
+    return text
 
 
 # ============================================================
-# 6. NEWSAPI CONFIGURATION
+# 5. ML PREDICTION
 # ============================================================
 
-# Read NewsAPI key from Streamlit secrets.
-#
-# In local development:
-# .streamlit/secrets.toml
-#
-# NEWS_API_KEY = "YOUR_NEW_API_KEY"
-
-try:
-    API_KEY = st.secrets["NEWS_API_KEY"]
-
-except Exception:
-    API_KEY = None
-
-
-# ============================================================
-# 7. SEARCH FOR RELATED NEWS USING NEWSAPI
-# ============================================================
-
-def search_news(query):
-
-    # If API key is not available,
-    # return an empty list.
-    if not API_KEY:
-        return []
-
-    url = "https://newsapi.org/v2/everything"
-
-    # Use a shorter query instead of sending
-    # the entire article to NewsAPI.
-    cleaned_query = clean_text(query)
-
-    # Take approximately the first 20 words
-    # to create a manageable search query.
-    query_words = cleaned_query.split()[:20]
-
-    search_query = " ".join(query_words)
-
-    params = {
-        "q": search_query,
-        "language": "en",
-        "sortBy": "relevancy",
-        "pageSize": 10,
-        "apiKey": API_KEY
-    }
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10
+def get_ml_prediction(news_text):
+    if vectorizer is None or ml_model is None:
+        raise RuntimeError(
+            "ML model artifacts could not be loaded."
         )
 
-        # If NewsAPI returns an error,
-        # return an empty list.
-        if response.status_code != 200:
-            return []
+    cleaned = clean_text(news_text)
 
-        data = response.json()
-
-        return data.get(
-            "articles",
-            []
+    if not cleaned:
+        raise ValueError(
+            "The input does not contain usable text."
         )
 
-    except requests.RequestException:
+    features = vectorizer.transform([cleaned])
 
-        return []
+    prediction = int(
+        ml_model.predict(features)[0]
+    )
 
-
-# ============================================================
-# 8. CALCULATE EXTERNAL EVIDENCE SCORE
-# ============================================================
-
-def evidence_score(news, articles):
-
-    # If no articles were found,
-    # there is no external evidence.
-    if len(articles) == 0:
-        return 0.0, None
-
-    # First document is the user's news.
-    docs = [news]
-
-    # Add title + description of every
-    # retrieved article.
-    for article in articles:
-
-        title = article.get(
-            "title",
-            ""
+    classes = list(
+        getattr(
+            ml_model,
+            "classes_",
+            [0, 1],
         )
-
-        description = article.get(
-            "description",
-            ""
-        )
-
-        docs.append(
-            title + " " + description
-        )
-
-    # Create a temporary TF-IDF vectorizer
-    # for comparing the input news with
-    # retrieved articles.
-    temp_vectorizer = TfidfVectorizer(
-        stop_words="english"
     )
 
-    # Convert all documents into TF-IDF vectors.
-    matrix = temp_vectorizer.fit_transform(
-        docs
-    )
-
-    # Calculate cosine similarity between
-    # user's news and all retrieved articles.
-    sims = cosine_similarity(
-        matrix[0:1],
-        matrix[1:]
-    )[0]
-
-    # Find the article with highest similarity.
-    best = np.argmax(sims)
-
-    return (
-        float(sims[best]),
-        articles[best]
-    )
-
-
-# ============================================================
-# 9. FINAL DECISION ENGINE
-# ============================================================
-
-def final_prediction(news):
-
-    # --------------------------------------------------------
-    # Step 1: Get ML prediction
-    # --------------------------------------------------------
-
-    pred, fake_prob, real_prob = get_ml_prediction(
-        news
-    )
-
-    # --------------------------------------------------------
-    # Step 2: Search for external evidence
-    # --------------------------------------------------------
-
-    articles = search_news(
-        news
-    )
-
-    # --------------------------------------------------------
-    # Step 3: Calculate evidence similarity
-    # --------------------------------------------------------
-
-    evidence, best_article = evidence_score(
-        news,
-        articles
-    )
-
-    # --------------------------------------------------------
-    # Step 4: Make final decision
-    # --------------------------------------------------------
-
-    # Strong external evidence + strong real probability
-    if (
-        len(articles) > 0
-        and evidence > 0.50
-        and real_prob > 0.70
+    if hasattr(
+        ml_model,
+        "predict_proba",
     ):
+        probabilities = ml_model.predict_proba(
+            features
+        )[0]
 
-        verdict = "Likely Real"
+        probability_map = {
+            int(cls): float(prob)
+            for cls, prob in zip(
+                classes,
+                probabilities,
+            )
+        }
 
-    # Strongly fake prediction + very low
-    # external similarity
-    elif (
-        len(articles) > 0
-        and evidence < 0.10
-        and fake_prob > 0.70
-    ):
+        fake_probability = probability_map.get(
+            0,
+            0.0,
+        )
 
-        verdict = "Likely Fake"
+        real_probability = probability_map.get(
+            1,
+            0.0,
+        )
 
-    # Very high ML confidence
-    elif real_prob > 0.90:
-
-        verdict = "Likely Real"
-
-    elif fake_prob > 0.90:
-
-        verdict = "Likely Fake"
-
-    # Otherwise, do not force a decision.
     else:
+        # This should not happen because the training
+        # notebook calibrates the selected model.
+        decision = float(
+            ml_model.decision_function(
+                features
+            )[0]
+        )
 
-        verdict = "Uncertain"
+        # Fallback conversion only.
+        import math
+
+        real_probability = 1.0 / (
+            1.0 + math.exp(-decision)
+        )
+
+        fake_probability = (
+            1.0 - real_probability
+        )
 
     return {
-        "prediction": pred,
-        "fake_prob": fake_prob,
-        "real_prob": real_prob,
-        "evidence": evidence,
-        "best_article": best_article,
-        "verdict": verdict
+        "prediction": prediction,
+        "label": (
+            "REAL"
+            if prediction == 1
+            else "FAKE"
+        ),
+        "fake_probability": fake_probability,
+        "real_probability": real_probability,
     }
 
 
 # ============================================================
-# 10. STREAMLIT USER INTERFACE
+# 6. API KEY CONFIGURATION
+# ============================================================
+
+FACTCHECK_API_KEY = st.secrets.get(
+    "FACTCHECK_API_KEY",
+    "",
+)
+
+
+# ============================================================
+# 7. SIDEBAR
+# ============================================================
+
+st.sidebar.title("⚙️ System Information")
+
+if MODEL_LOAD_ERROR:
+    st.sidebar.error(
+        "ML model loading failed."
+    )
+    st.sidebar.code(
+        MODEL_LOAD_ERROR
+    )
+else:
+    st.sidebar.success(
+        "ML model loaded"
+    )
+
+st.sidebar.write(
+    "**Selected model:** "
+    + ml_metadata.get(
+        "best_model_name",
+        "Unknown",
+    )
+)
+
+if ml_metadata.get("test_f1_macro") is not None:
+    st.sidebar.write(
+        "**Test Macro-F1:** "
+        f"{ml_metadata['test_f1_macro']:.4f}"
+    )
+
+if FACTCHECK_API_KEY:
+    st.sidebar.success(
+        "Google Fact Check API connected"
+    )
+else:
+    st.sidebar.warning(
+        "Google Fact Check API key not configured"
+    )
+
+
+# ============================================================
+# 8. MAIN UI
 # ============================================================
 
 st.title(
@@ -340,181 +261,355 @@ st.title(
 )
 
 st.write(
-    "Enter a news headline or article text "
-    "to analyze whether it is likely real or fake."
+    "This system combines an automatically selected "
+    "TF-IDF machine-learning classifier with "
+    "Google's existing professional fact-check reviews."
 )
 
+st.info(
+    "Important: Google Fact Check searches claims that "
+    "have already been fact-checked. It is not a general "
+    "Google News search. A new claim may therefore have "
+    "no external fact-check even when it is true."
+)
 
-# ============================================================
-# 11. NEWS INPUT BOX
-# ============================================================
 
 news_text = st.text_area(
     "Enter News",
-    height=250,
+    height=260,
     placeholder=(
-        "Paste a news headline or article here..."
-    )
+        "Paste a news headline or article text here..."
+    ),
 )
 
 
 # ============================================================
-# 12. ANALYZE NEWS BUTTON
+# 9. ANALYZE
 # ============================================================
 
-if st.button("Analyze News"):
-
-    # --------------------------------------------------------
-    # Check whether user entered anything
-    # --------------------------------------------------------
+if st.button(
+    "🔍 Analyze News",
+    type="primary",
+):
 
     if not news_text.strip():
+        st.warning(
+            "Please enter a news headline or article."
+        )
+        st.stop()
+
+    if MODEL_LOAD_ERROR:
+        st.error(
+            "The trained ML model could not be loaded. "
+            "Run the training notebook first."
+        )
+        st.stop()
+
+    # --------------------------------------------------------
+    # STEP 1: CLAIM
+    # --------------------------------------------------------
+
+    claim = extract_claim(
+        news_text
+    )
+
+    st.subheader(
+        "🔎 Claim Being Checked"
+    )
+
+    st.write(claim)
+
+    # --------------------------------------------------------
+    # STEP 2: ML MODEL
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Running the selected ML model..."
+    ):
+
+        ml_result = get_ml_prediction(
+            news_text
+        )
+
+    st.subheader(
+        "🤖 Machine Learning Prediction"
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "ML Prediction",
+            ml_result["label"],
+        )
+
+    with col2:
+        st.metric(
+            "Fake Probability",
+            f"{ml_result['fake_probability']:.2%}",
+        )
+
+    with col3:
+        st.metric(
+            "Real Probability",
+            f"{ml_result['real_probability']:.2%}",
+        )
+
+    # --------------------------------------------------------
+    # STEP 3: GOOGLE FACT CHECK
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Searching Google Fact Check..."
+    ):
+
+        fact_checks, factcheck_status = (
+            search_fact_checks(
+                claim=claim,
+                api_key=FACTCHECK_API_KEY,
+                max_results=10,
+            )
+        )
+
+    # --------------------------------------------------------
+    # STEP 4: SEMANTIC MATCHING OF FACT CHECKS
+    # --------------------------------------------------------
+
+    with st.spinner(
+        "Matching fact-check reviews to the claim..."
+    ):
+
+        matched_fact_checks = match_fact_checks(
+            claim,
+            fact_checks,
+        )
+
+    # --------------------------------------------------------
+    # STEP 5: FINAL DECISION
+    # --------------------------------------------------------
+
+    final_result = combine_ml_and_factcheck(
+        ml_result=ml_result,
+        matched_fact_checks=matched_fact_checks,
+        factcheck_status=factcheck_status,
+    )
+
+    # --------------------------------------------------------
+    # FINAL VERDICT
+    # --------------------------------------------------------
+
+    st.subheader(
+        "### Final Fact Check"
+    )
+
+    if final_result["verdict"] == "LIKELY REAL":
+        st.success(
+            "✅ LIKELY REAL"
+        )
+
+    elif final_result["verdict"] == "LIKELY FAKE":
+        st.error(
+            "❌ LIKELY FAKE"
+        )
+
+    elif final_result["verdict"] == "CONFLICTING":
+        st.warning(
+            "⚠️ CONFLICTING EVIDENCE"
+        )
+
+    else:
+        st.info(
+            "ℹ️ NOT ENOUGH EVIDENCE"
+        )
+
+    st.write(
+        final_result["explanation"]
+    )
+
+    st.progress(
+        final_result["decision_confidence"]
+    )
+
+    st.caption(
+        "Decision confidence is a system confidence score, "
+        "not a mathematical probability that the claim is true."
+    )
+
+    # --------------------------------------------------------
+    # EVIDENCE SUMMARY
+    # --------------------------------------------------------
+
+    st.subheader(
+        "📊 Evidence Summary"
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Fact Checks Found",
+            len(matched_fact_checks),
+        )
+
+    with col2:
+        st.metric(
+            "Supporting Reviews",
+            final_result["supporting_reviews"],
+        )
+
+    with col3:
+        st.metric(
+            "Refuting Reviews",
+            final_result["refuting_reviews"],
+        )
+
+    # --------------------------------------------------------
+    # FACT CHECK DETAILS
+    # --------------------------------------------------------
+
+    st.subheader(
+        "🔍 Google Fact Check Evidence"
+    )
+
+    if factcheck_status["status"] == "missing_key":
 
         st.warning(
-            "Please enter some news text."
+            "Google Fact Check API key is not configured."
+        )
+
+    elif factcheck_status["status"] == "api_error":
+
+        st.error(
+            factcheck_status["message"]
+        )
+
+    elif not matched_fact_checks:
+
+        st.info(
+            "No sufficiently matching professional "
+            "fact-check review was found."
         )
 
     else:
 
-        # ----------------------------------------------------
-        # Run complete hybrid prediction system
-        # ----------------------------------------------------
+        for index, review in enumerate(
+            matched_fact_checks,
+            start=1,
+        ):
 
-        result = final_prediction(
-            news_text
-        )
-
-        # Extract results
-        fake_prob = result["fake_prob"]
-        real_prob = result["real_prob"]
-        evidence = result["evidence"]
-        best_article = result["best_article"]
-        verdict = result["verdict"]
-
-
-        # ====================================================
-        # 13. DISPLAY FINAL VERDICT
-        # ====================================================
-
-        st.subheader(
-            "Final Verdict"
-        )
-
-        if verdict == "Likely Real":
-
-            st.success(
-                "🟢 Likely Real"
+            title = (
+                review.get("title")
+                or f"Fact Check Review {index}"
             )
 
-        elif verdict == "Likely Fake":
-
-            st.error(
-                "🔴 Likely Fake"
-            )
-
-        else:
-
-            st.warning(
-                "🟡 Uncertain"
-            )
-
-
-        # ====================================================
-        # 14. DISPLAY ML PROBABILITIES
-        # ====================================================
-
-        st.subheader(
-            "ML Model Confidence"
-        )
-
-        st.write(
-            f"Real Probability: {real_prob:.2%}"
-        )
-
-        st.write(
-            f"Fake Probability: {fake_prob:.2%}"
-        )
-
-
-        # ====================================================
-        # 15. DISPLAY EVIDENCE SCORE
-        # ====================================================
-
-        st.subheader(
-            "External Evidence"
-        )
-
-        st.write(
-            f"Evidence Similarity Score: "
-            f"{evidence:.2%}"
-        )
-
-
-        # ====================================================
-        # 16. DISPLAY SUPPORTING ARTICLE
-        # ====================================================
-
-        if best_article:
-
-            st.subheader(
-                "Most Similar Retrieved Article"
-            )
-
-            article_title = best_article.get(
-                "title",
-                "No title available"
-            )
-
-            article_description = best_article.get(
-                "description",
-                ""
-            )
-
-            article_url = best_article.get(
-                "url",
-                ""
-            )
-
-            source = best_article.get(
-                "source",
-                {}
-            )
-
-            source_name = source.get(
-                "name",
-                "Unknown source"
-            )
-
-            st.write(
-                f"**Source:** {source_name}"
-            )
-
-            st.write(
-                f"**Title:** {article_title}"
-            )
-
-            if article_description:
+            with st.expander(
+                f"{index}. {title}"
+            ):
 
                 st.write(
-                    f"**Description:** "
-                    f"{article_description}"
+                    "**Publisher:** "
+                    + (
+                        review.get(
+                            "publisher",
+                            "Unknown",
+                        )
+                        or "Unknown"
+                    )
                 )
 
-            if article_url:
-
-                st.markdown(
-                    f"[Read Supporting Article]({article_url})"
+                st.write(
+                    "**Rating:** "
+                    + (
+                        review.get(
+                            "rating",
+                            "Not available",
+                        )
+                        or "Not available"
+                    )
                 )
 
-        else:
+                st.write(
+                    "**Semantic match:** "
+                    f"{review.get('semantic_score', 0.0):.2%}"
+                )
 
-            st.info(
-                "No related external article "
-                "was found. The result is based "
-                "mainly on the ML model."
-            )
+                st.write(
+                    "**NLI match:** "
+                    + review.get(
+                        "nli_match",
+                        "UNKNOWN",
+                    )
+                )
 
+                st.write(
+                    "**Fact-checked claim:**"
+                )
 
-# ============================================================
-# END OF APPLICATION
-# ============================================================
+                st.write(
+                    review.get(
+                        "claim",
+                        "",
+                    )
+                )
+
+                if review.get("review_date"):
+                    st.write(
+                        "**Review date:** "
+                        + review["review_date"]
+                    )
+
+                if review.get("url"):
+                    st.markdown(
+                        "[Open professional fact-check]("
+                        + review["url"]
+                        + ")"
+                    )
+
+    # --------------------------------------------------------
+    # DECISION BREAKDOWN
+    # --------------------------------------------------------
+
+    st.subheader(
+        "🧩 Decision Breakdown"
+    )
+
+    st.write(
+        f"**ML prediction:** "
+        f"{ml_result['label']}"
+    )
+
+    st.write(
+        f"**ML real probability:** "
+        f"{ml_result['real_probability']:.2%}"
+    )
+
+    st.write(
+        f"**ML fake probability:** "
+        f"{ml_result['fake_probability']:.2%}"
+    )
+
+    st.write(
+        f"**Matching professional fact checks:** "
+        f"{len(matched_fact_checks)}"
+    )
+
+    st.write(
+        f"**Fact-check support score:** "
+        f"{final_result['factcheck_support_score']:.2f}"
+    )
+
+    st.write(
+        f"**Fact-check refute score:** "
+        f"{final_result['factcheck_refute_score']:.2f}"
+    )
+
+    # --------------------------------------------------------
+    # LIMITATION
+    # --------------------------------------------------------
+
+    st.caption(
+        "The ML classifier learns patterns from the training "
+        "dataset. Google Fact Check contributes previously "
+        "published human fact-check reviews. Neither source "
+        "should be interpreted as a guarantee of truth."
+    )
